@@ -1,10 +1,11 @@
-import { Sandbox } from "./sandbox"
 import { InferenceClient } from "@huggingface/inference"
 import type { ChatCompletionInputMessage } from "@huggingface/tasks";
+import { SandboxManager } from "./sandboxmanager";
 
 
 const client = new InferenceClient(process.env.HUGGINGFACE)
-const sandbox = new Sandbox()
+const SESSION_ID = "default-session";
+
 
 const tools = [{
     type: 'function' as const,
@@ -26,8 +27,7 @@ const tools = [{
 
 const runTool = async (tool: any): Promise<string> => {
     if (tool.function.name === 'run_python') {
-        console.log(tool)
-        await sandbox.initialize()
+        const sandbox = await SandboxManager.getInstance().getOrCreate(SESSION_ID)
         const args = JSON.parse(tool.function.arguments);
         console.log(`\n[Agent is writing code]:\n${args.code}\n`);
 
@@ -35,11 +35,17 @@ const runTool = async (tool: any): Promise<string> => {
         await sandbox.writeFile('agent_script.py', args.code);
 
         // 2. Execute it inside the isolated container
-        const output = await sandbox.executeCode(['python', 'agent_script.py'], (chunk) => {
-            process.stdout.write(`[Live Stream of Docker] ${chunk}`)
-        });
+        const result = await sandbox.executeCode(['python', 'agent_script.py'], {
+            timeoutMs: 15_000,
+            onStream: (chunk, stream) => {
+                process.stdout.write(`[${stream}] ${chunk}`);
+            }
+    });
 
-        return output || "Code executed successfully with no output."
+        if (!result.success) {
+            return `Code failed (exit ${result.exitCode}):\n${result.stderr || result.stdout}`;
+        }
+        return result.stdout || "Code executed successfully with no output.";
 
 
     }
@@ -51,26 +57,26 @@ const messages: ChatCompletionInputMessage[] = [{ role: 'system', content: 'You 
 const Agent = async (query: string) => {
     messages.push({ role: 'user', content: query })
     const MAX_ITER = 4                  //max iteration 
-    
+
     let content = ''
 
     try {
         for (let i = 0; i <= MAX_ITER; i++) {
 
             const stream = client.chatCompletionStream({
-                model: 'Qwen/Qwen3.8-27B',
+                model: 'deepseek-ai/DeepSeek-V4.1-Flash',
                 messages: messages,
                 tools: tools,
                 tool_choice: "auto"
 
             })
             let toolCalls = []
-            let toolId =''
+            let toolId = ''
             let toolName = ''
             let toolArgs = ''
             for await (const chunk of stream) {
                 if (chunk.choices[0]?.delta.tool_calls) {
-                    
+
                     const tool = chunk.choices[0].delta.tool_calls
                     if (tool.length > 0) {
                         const tool_call = tool[0]
@@ -82,11 +88,11 @@ const Agent = async (query: string) => {
                         }
 
                         if (tool_call?.function?.arguments) {
-                            
+
                             toolArgs += tool_call.function.arguments
                         }
                     }
-                    
+
                 }
                 if (chunk.choices[0]?.delta.content) {
                     content += chunk.choices[0].delta.content
@@ -94,8 +100,8 @@ const Agent = async (query: string) => {
                 }
 
             }
-            if(toolId && toolName){
-                toolCalls.push({id:toolId,function:{name:toolName , arguments:toolArgs}})
+            if (toolId && toolName) {
+                toolCalls.push({ id: toolId, function: { name: toolName, arguments: toolArgs } })
 
             }
             if (content || toolCalls.length) {
@@ -105,13 +111,15 @@ const Agent = async (query: string) => {
                 return
             }
             for (const call of toolCalls) {
+                
+                
                 messages.push({ role: 'tool', tool_call_id: call.id, name: call.function.name, content: await runTool(call) })
             }
         }
     } catch (error) {
         console.error("Agent Loop Error:", error);
     } finally {
-        await sandbox.destroy();
+        await SandboxManager.getInstance().destroy(SESSION_ID);
     }
 
 

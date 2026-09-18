@@ -21,7 +21,23 @@ for i in range(1, 6):
 print("Process complete!")
     `.trim()
 
-        await sandbox.writeFile('math_tools.py', scriptContent);
+        const errorScript = `import time
+import sys
+
+print("Starting risky process...")
+sys.stdout.flush()
+time.sleep(1)
+
+print("Triggering intentional error...")
+sys.stdout.flush()
+time.sleep(1)
+
+# This will throw a ZeroDivisionError and print a stack trace to stderr
+result = 1 / 0
+
+print("This line will never be reached.")`.trim()
+
+        await sandbox.writeFile('math_tools.py', errorScript);
 
         // const readBack = await sandbox.readFile('math_tools.py');
         // console.log(`\n--- File Contents ---\n${readBack}\n---------------------\n`);

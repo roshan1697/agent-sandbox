@@ -3,17 +3,43 @@ import { Writable } from 'stream'
 
 const docker = new Docker({ socketPath: '//./pipe/docker_engine', protocol: 'http', port: '2375', host: '127.0.0.1' })
 
+export interface ExecResult {
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+    success: boolean;
+}
+
+export class SandboxTimeoutError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "SandboxTimeoutError";
+    }
+}
+
+export interface ExecOptions {
+    onStream?: (chunk: string, stream: "stdout" | "stderr") => void;
+    timeoutMs?: number;
+}
+
+
+
+
+
 export class Sandbox {
     private container: Docker.Container | null = null;
     private image: string;
+    public readonly id: string;
 
-    constructor(image: string = 'python:3.9-alpine') {
+
+    constructor(id: string, image: string = 'python:3.9-alpine') {
         this.image = image;
+        this.id = id
     }
 
 
     async initialize() {
-        console.log(`[Sandbox] Pulling image ${this.image}...`);
+        console.log(`[Sandbox: ${this.id}] Pulling image ${this.image}...`);
         // Ensure the image exists locally
         await new Promise((resolve, reject) => {
             docker.pull(this.image, (err: Error, stream: NodeJS.ReadableStream) => {
@@ -22,7 +48,7 @@ export class Sandbox {
             });
         });
 
-        console.log(`[Sandbox] Starting container...`);
+        console.log(`[Sandbox: ${this.id}] Starting container...`);
         this.container = await docker.createContainer({
             Image: this.image,
             Cmd: ['tail', '-f', '/dev/null'], // Keep the container running in the background
@@ -35,41 +61,82 @@ export class Sandbox {
         });
 
         await this.container.start();
-        console.log(`[Sandbox] Container ready: ${this.container.id.substring(0, 8)}`);
+        console.log(`[Sandbox: ${this.id}] Container ready: ${this.container.id.substring(0, 8)}`);
     }
 
 
-    async executeCode(command: string[], onSteam?: (chunk: string) => void): Promise<string> {
+    async executeCode(command: string[], options: ExecOptions = {}
+    ): Promise<ExecResult> {
         if (!this.container) throw new Error("Sandbox not initialized");
+        const { onStream, timeoutMs = 30_000 } = options;
 
         const exec = await this.container.exec({
             Cmd: command,
             AttachStdout: true,
             AttachStderr: true,
+            Tty: false,
+
         });
 
         const stream = await exec.start({ Detach: false });
         // Capture the output
-        let output = '';
-        const outStream = new Writable({
+        let stdout = "";
+        let stderr = "";
+
+        const stdoutSink = new Writable({
             write(chunk, encoding, next) {
-                // Docker multiplexes stdout/stderr, we strip the 8-byte header
 
-                const textChunk = chunk.toString('utf8');
-                output += textChunk
+                const textChunk = chunk
+                stdout += textChunk
 
-                if(onSteam){
-                    onSteam(textChunk)
-                }
+                onStream?.(textChunk, "stdout");
+
                 next();
             }
+        })
+
+        const stderrSink = new Writable({
+            write(chunk, encoding, next) {
+                const textChunk = chunk
+                stderr += textChunk
+                onStream?.(textChunk, "stderr");
+
+                next()
+            }
+        })
+
+        this.container.modem.demuxStream(stream, stdoutSink, stderrSink);
+
+        let settled = false;
+        const waitForEnd = new Promise<void>((resolve) => {
+            stream.on("end", () => {
+                settled = true;
+                resolve();
+            });
         });
 
-        this.container.modem.demuxStream(stream, outStream, outStream);
+        const timedOut = await Promise.race([
+            waitForEnd.then(() => false),
+            new Promise<boolean>((resolve) =>
+                setTimeout(() => resolve(!settled), timeoutMs)
+            ),
+        ]);
 
-        return new Promise((resolve) => {
-            stream.on('end', () => resolve(output.trim()));
-        });
+        if (timedOut) {
+            throw new SandboxTimeoutError(
+                `Command timed out after ${timeoutMs}ms: ${command.join(" ")}`
+            );
+        }
+
+        const inspectResult = await exec.inspect();
+        const exitCode = inspectResult.ExitCode ?? -1;
+
+        return {
+            stdout: stdout.trim(),
+            stderr: stderr.trim(),
+            exitCode,
+            success: exitCode === 0,
+        }
     }
 
 
@@ -82,20 +149,49 @@ export class Sandbox {
             `mkdir -p $(dirname ${filePath}) && echo "${base64Content}" | base64 -d > ${filePath}`
         ];
 
-        await this.executeCode(command);
-        console.log(`[Sandbox] Wrote file: ${filePath}`);
+        const result = await this.executeCode(command);
+        if (!result.success) {
+            throw new Error(`Failed to write file ${filePath}: ${result.stderr}`);
+        }
     }
 
-    
+
     async readFile(filePath: string): Promise<string> {
         // Read the file as base64 to preserve all formatting and special characters
-        const base64Output = await this.executeCode(['sh', '-c', `base64 ${filePath}`]);
-
-        if (base64Output.includes('can\'t open')) {
-            throw new Error(`File not found: ${filePath}`);
+        const result = await this.executeCode(["sh", "-c", `base64 "${filePath}"`]);
+        if (!result.success) {
+            throw new Error(`File not found or unreadable: ${filePath} (${result.stderr})`);
         }
+        return Buffer.from(result.stdout, "base64").toString("utf-8");
+    }
 
-        return Buffer.from(base64Output.trim(), 'base64').toString('utf-8');
+    async mkdir(dirPath: string): Promise<void> {
+        const result = await this.executeCode(["mkdir", "-p", dirPath]);
+        if (!result.success) {
+            throw new Error(`Failed to create dir ${dirPath}: ${result.stderr}`);
+        }
+    }
+
+    async listFiles(dirPath: string = "."): Promise<string[]> {
+        const result = await this.executeCode(["ls", "-1a", dirPath]);
+        if (!result.success) {
+            throw new Error(`Failed to list ${dirPath}: ${result.stderr}`);
+        }
+        return result.stdout
+            .split("\n")
+            .filter((f) => f && f !== "." && f !== "..");
+    }
+
+    async deleteFile(filePath: string): Promise<void> {
+        const result = await this.executeCode(["rm", "-rf", filePath]);
+        if (!result.success) {
+            throw new Error(`Failed to delete ${filePath}: ${result.stderr}`);
+        }
+    }
+
+    async exists(filePath: string): Promise<boolean> {
+        const result = await this.executeCode(["sh", "-c", `test -e "${filePath}"`]);
+        return result.success;
     }
 
     async destroy() {
