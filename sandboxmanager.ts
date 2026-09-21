@@ -1,4 +1,4 @@
-import { Sandbox } from "./sandbox";
+import { Sandbox, type SandboxOptions } from "./sandbox";
 
 export class SandboxManager {
     private static instance: SandboxManager
@@ -14,10 +14,10 @@ export class SandboxManager {
         }
         return this.instance
     }
-    async getOrCreate(id: string, image?: string): Promise<Sandbox> {
+    async getOrCreate(id: string, options?: SandboxOptions): Promise<Sandbox> {
         let sandbox = this.sandboxes.get(id);
         if (!sandbox) {
-            sandbox = new Sandbox(id, image);
+            sandbox = new Sandbox(id, options);
             await sandbox.initialize();
             this.sandboxes.set(id, sandbox);
         }
