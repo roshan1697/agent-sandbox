@@ -23,7 +23,24 @@ const tools = [{
             required: ['code']
         }
     }
-}]
+},{
+    type: 'function' as const,
+    function:{
+        name: 'git_clone',
+        description:'Git clone the url in a secure sandbox.',
+        parameters:{
+            type: 'object',
+            properties: {
+                repoUrl:{
+                    type:'string',
+                    description: 'The github url given by the user.'
+                }
+            },
+            required: ['repoUrl']
+        }
+    }
+}
+]
 
 const runTool = async (tool: any): Promise<string> => {
     if (tool.function.name === 'run_python') {
@@ -47,6 +64,20 @@ const runTool = async (tool: any): Promise<string> => {
         }
         return result.stdout || "Code executed successfully with no output.";
 
+
+    }
+    if(tool.function.name === 'git_clone'){
+        const sandbox = await SandboxManager.getInstance().getOrCreate(SESSION_ID,{
+            network:'restricted'
+        })
+        const args = JSON.parse(tool.function.arguments)
+
+        const result  = await sandbox.cloneRepo(args.repoUrl)
+
+        if (!result.success) {
+            return `Code failed (exit ${result.exitCode}):\n${result.stderr || result.stdout}`;
+        }
+        return result.stdout || "Code executed successfully with no output.";
 
     }
     return 'no tool available'
