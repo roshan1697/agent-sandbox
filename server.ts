@@ -38,7 +38,7 @@ const  streamExec = (
     timeoutMs?: number
 ): Response => {
     const encoder = new TextEncoder();
-    let controllerRef: ReadableStreamDefaultController<Uint8Array>;
+    let controllerRef!: ReadableStreamDefaultController<Uint8Array>;
 
     const body = new ReadableStream({
         start(controller) {

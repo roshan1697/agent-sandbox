@@ -8,6 +8,7 @@ export interface ExecResult {
     stderr: string;
     exitCode: number;
     success: boolean;
+    truncated: boolean
 }
 
 export class SandboxTimeoutError extends Error {
@@ -17,9 +18,17 @@ export class SandboxTimeoutError extends Error {
     }
 }
 
+export class SandboxOutputLimitError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "SandboxOutputLimitError";
+    }
+}
+
 export interface ExecOptions {
     onStream?: (chunk: string, stream: "stdout" | "stderr") => void;
     timeoutMs?: number;
+    maxOutputBytes?: number
 }
 
 export type NetworkAccess = "none" | "restricted";
@@ -27,6 +36,10 @@ export type NetworkAccess = "none" | "restricted";
 export interface SandboxOptions {
     image?: string;
     network?: NetworkAccess;
+    memoryMB?: number;
+    cpus?: number;
+    pidsLimit?: number;
+
 }
 
 const INTERNAL_NETWORK_NAME = "sandbox-restricted-net";
@@ -124,6 +137,9 @@ export class Sandbox {
     private container: Docker.Container | null = null;
     private image: string;
     private networkMode: NetworkAccess;
+    private memoryMB: number;
+    private cpus: number;
+    private pidsLimit: number;
     public readonly id: string;
 
 
@@ -131,6 +147,9 @@ export class Sandbox {
         this.image = options.image ?? "python:3.9-alpine";
         this.id = id
         this.networkMode = options.network ?? "none";
+        this.memoryMB = options.memoryMB ?? 256;
+        this.cpus = options.cpus ?? 1;
+        this.pidsLimit = options.pidsLimit ?? 128;
 
     }
 
@@ -147,7 +166,9 @@ export class Sandbox {
 
         const env: string[] = [];
         const hostConfig: Docker.ContainerCreateOptions["HostConfig"] = {
-            Memory: 256 * 1024 * 1024, // Hard limit: 256MB RAM
+            Memory: this.memoryMB * 1024 * 1024,
+            NanoCpus: Math.round(this.cpus * 1e9), // CPU cap, e.g. 0.5 cores
+            PidsLimit: this.pidsLimit, // caps total processes/threads — blocks fork bombs
             AutoRemove: true,
         };
         if (this.networkMode === "restricted") {
@@ -165,7 +186,8 @@ export class Sandbox {
             hostConfig.NetworkMode = "none"; // Security: no network at all
         }
         console.log(
-            `[Sandbox:${this.id}] Starting container (network: ${this.networkMode})...`
+            `[Sandbox:${this.id}] Starting container (network: ${this.networkMode}, ` +
+            `cpus: ${this.cpus}, memory: ${this.memoryMB}MB, pidsLimit: ${this.pidsLimit})...`
         );
         this.container = await docker.createContainer({
             Image: this.image,
@@ -183,7 +205,7 @@ export class Sandbox {
     async executeCode(command: string[], options: ExecOptions = {}
     ): Promise<ExecResult> {
         if (!this.container) throw new Error("Sandbox not initialized");
-        const { onStream, timeoutMs = 30_000 } = options;
+        const { onStream, timeoutMs = 30_000, maxOutputBytes = 2 * 1024 * 1024, } = options;
 
         const exec = await this.container.exec({
             Cmd: command,
@@ -197,6 +219,20 @@ export class Sandbox {
         // Capture the output
         let stdout = "";
         let stderr = "";
+        let totalBytes = 0;
+        let outputExceeded = false;
+        let resolveLimitExceeded: () => void;
+        const limitExceeded = new Promise<void>((resolve) => {
+            resolveLimitExceeded = resolve;
+        });
+
+        const track = (text: string) => {
+            totalBytes += Buffer.byteLength(text, "utf8");
+            if (totalBytes > maxOutputBytes && !outputExceeded) {
+                outputExceeded = true;
+                resolveLimitExceeded();
+            }
+        };
 
         const stdoutSink = new Writable({
             write(chunk, encoding, next) {
@@ -205,6 +241,7 @@ export class Sandbox {
                 stdout += textChunk
 
                 onStream?.(textChunk, "stdout");
+                track(textChunk);
 
                 next();
             }
@@ -215,6 +252,7 @@ export class Sandbox {
                 const textChunk = chunk
                 stderr += textChunk
                 onStream?.(textChunk, "stderr");
+                track(textChunk);
 
                 next()
             }
@@ -222,24 +260,23 @@ export class Sandbox {
 
         this.container.modem.demuxStream(stream, stdoutSink, stderrSink);
 
-        let settled = false;
-        const waitForEnd = new Promise<void>((resolve) => {
-            stream.on("end", () => {
-                settled = true;
-                resolve();
-            });
-        });
+        const waitForEnd = new Promise<void>((resolve) => stream.on("end", resolve));
 
-        const timedOut = await Promise.race([
-            waitForEnd.then(() => false),
-            new Promise<boolean>((resolve) =>
-                setTimeout(() => resolve(!settled), timeoutMs)
-            ),
+        const outcome = await Promise.race([
+            waitForEnd.then(() => "done" as const),
+            new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), timeoutMs)),
+            limitExceeded.then(() => "limit" as const),
         ]);
 
-        if (timedOut) {
-            throw new SandboxTimeoutError(
-                `Command timed out after ${timeoutMs}ms: ${command.join(" ")}`
+        if (outcome !== "done") {
+            await this.killExec(exec);
+            if (outcome === "timeout") {
+                throw new SandboxTimeoutError(
+                    `Command timed out after ${timeoutMs}ms: ${command.join(" ")}`
+                );
+            }
+            throw new SandboxOutputLimitError(
+                `Command exceeded output limit of ${maxOutputBytes} bytes and was terminated: ${command.join(" ")}`
             );
         }
 
@@ -251,9 +288,22 @@ export class Sandbox {
             stderr: stderr.trim(),
             exitCode,
             success: exitCode === 0,
+            truncated: outputExceeded,
+
         }
     }
 
+    private async killExec(exec: Docker.Exec): Promise<void> {
+        try {
+            const info = await exec.inspect();
+            const pid = info.Pid;
+            if (pid) {
+                await this.executeCode(["kill", "-9", String(pid)], { timeoutMs: 5_000 });
+            }
+        } catch {
+            // Best effort — if this fails there's nothing more we can do from here.
+        }
+    }
 
     async writeFile(filePath: string, content: string): Promise<void> {
         const base64Content = Buffer.from(content).toString('base64');
@@ -342,7 +392,7 @@ export class Sandbox {
         );
     }
 
-    
+
     async cloneRepo(repoUrl: string, destPath: string = "."): Promise<ExecResult> {
         if (this.networkMode === "none") {
             throw new Error(
