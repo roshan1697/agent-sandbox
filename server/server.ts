@@ -3,8 +3,8 @@ import {
     SandboxTimeoutError,
     type Sandbox,
     type NetworkAccess,
-} from "./sandbox";
-import { SandboxManager } from "./sandboxmanager";
+} from "../sandbox/sandbox";
+import { SandboxManager } from "../sandbox/sandboxmanager";
 const PORT = Number(process.env.PORT ?? 8787);
 const HOST = "127.0.0.1"; // local-only 
 

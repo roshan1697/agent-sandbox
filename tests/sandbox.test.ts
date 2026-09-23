@@ -3,8 +3,8 @@ import {
     Sandbox,
     SandboxTimeoutError,
     SandboxOutputLimitError,
-} from "../sandbox";
-import { SandboxManager } from "../sandboxmanager";
+} from "../sandbox/sandbox";
+import { SandboxManager } from "../sandbox/sandboxmanager";
 
 // These are integration tests — they spin up real Docker containers, so
 // they're slower than unit tests and require a running local Docker daemon.
@@ -91,9 +91,8 @@ describe("SandboxManager", () => {
     }, 60_000);
 });
 
-// Networked sandboxes need real internet access and are slower (image pulls,
-// installing squid/git, DNS lookups). Remove `.skip` locally to exercise them.
-describe.skip("Sandbox (restricted network)", () => {
+
+describe("Sandbox (restricted network)", () => {
     test("can clone a public repo", async () => {
         const sandbox = new Sandbox("test-network-sandbox", { network: "restricted" });
         await sandbox.initialize();

@@ -1,6 +1,6 @@
 import { InferenceClient } from "@huggingface/inference"
 import type { ChatCompletionInputMessage } from "@huggingface/tasks";
-import { SandboxManager } from "./sandboxmanager";
+import { SandboxManager } from "./sandbox/sandboxmanager";
 
 
 const client = new InferenceClient(process.env.HUGGINGFACE)

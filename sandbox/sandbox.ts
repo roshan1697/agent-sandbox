@@ -53,6 +53,7 @@ const ALLOWED_DOMAINS = [
     ".github.com",
     ".githubusercontent.com",
     ".alpinelinux.org",
+    ".dl-cdn.alpinelinux.org"
 ];
 
 const buildSquidConfig = (): string => {
@@ -412,7 +413,7 @@ export class Sandbox {
 
     async destroy() {
         if (this.container) {
-            console.log(`[Sandbox] Tearing down...`);
+            console.log(`[Sandbox:${this.id}] Tearing down...`);
             await this.container.stop(); // AutoRemove will delete it
             this.container = null;
         }

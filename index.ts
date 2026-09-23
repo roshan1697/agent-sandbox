@@ -1,10 +1,12 @@
-import { Sandbox } from './sandbox';
+import { SandboxManager } from './sandbox/sandboxmanager';
+
+
+const SESSION_ID = "default-session";
 
 async function main() {
-    const sandbox = new Sandbox();
 
     try {
-        await sandbox.initialize();
+        const sandbox = await SandboxManager.getInstance().getOrCreate(SESSION_ID);
 
         const scriptContent = `
 import time
@@ -42,18 +44,23 @@ print("This line will never be reached.")`.trim()
         // const readBack = await sandbox.readFile('math_tools.py');
         // console.log(`\n--- File Contents ---\n${readBack}\n---------------------\n`);
 
-        const result = await sandbox.executeCode(['python', 'math_tools.py'],
-            (chunk) => {
-                process.stdout.write(`[Live Stream] ${chunk}`)
+        const result = await sandbox.executeCode(['python', 'math_tools.py'],{
+
+            onStream:(chunk,stream) => {
+                process.stdout.write(`[${stream}] ${chunk}`)
             }
+        }
         );
-        console.log(`\n[Host] Execution finished. Full captured output length: ${result.length} characters.`);
+        if (!result.success) {
+            return `Code failed (exit ${result.exitCode}):\n${result.stderr || result.stdout}`;
+        }
+        return result.stdout || "Code executed successfully with no output.";
         
 
     } catch (error) {
         console.error("Sandbox error:", error);
     } finally {
-        await sandbox.destroy();
+        await SandboxManager.getInstance().destroy(SESSION_ID);
     }
 }
 
